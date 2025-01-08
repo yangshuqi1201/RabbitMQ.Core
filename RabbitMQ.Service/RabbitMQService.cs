@@ -15,23 +15,14 @@ namespace RabbitMQ.Service
 
         public RabbitMQService(IConfiguration configuration)
         {
-            _rabbitmqManager = new RabbitMQManager(
-                configuration["MQ:Host"],
-                Convert.ToInt32(configuration["MQ:Port"]),
-                configuration["MQ:User"],
-                configuration["MQ:Password"],
-                configuration["MQ:ExchangeName"]);
+            _rabbitmqManager = new RabbitMQManager(configuration);
 
-            Console.WriteLine("【开始】>>>>>>>>>>>>>>>生产者连接");
-
+           
             //初始化生产者连接
             _rabbitmqManager.InitProducerConnection();
 
-            Console.WriteLine("【结束】>>>>>>>>>>>>>>>生产者连接");
-
             var queueConfigs = configuration.GetSection("MQ:Queues").Get<List<QueueConfigInfo>>();
 
-            Console.WriteLine("【开始】>>>>>>>>>>>>>>>消费者连接");
             //初始化消费者连接
             _rabbitmqManager.InitConsumerConnections(queueConfigs);
         }

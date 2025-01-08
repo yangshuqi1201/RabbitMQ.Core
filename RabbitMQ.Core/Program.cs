@@ -16,10 +16,9 @@ builder.Services.AddSingleton<ActionService>();
 var app = builder.Build();
 
 RabbitMQService rabbitMQService = app.Services.GetRequiredService<RabbitMQService>();
-
+var consumer = app.Services.GetRequiredService<ActionService>();
 //队列1的消费任务
 await Task.Run(async () => {
-    var consumer = app.Services.GetRequiredService<ActionService>();
     await rabbitMQService.Instance.ConncetionReceive(
         0,
         configuration["MQ:ExchangeName"],
@@ -29,12 +28,22 @@ await Task.Run(async () => {
 });
 //队列2的消费任务
 await Task.Run(async () => {
-    var consumer = app.Services.GetRequiredService<ActionService>();
     await rabbitMQService.Instance.ConncetionReceive(
         1,
         configuration["MQ:ExchangeName"],
         configuration["MQ:Queues:1:QueueName"],
         consumer.ExActionTwo
+    );
+});
+
+// 启动死信队列消费者
+await Task.Run(async () =>
+{
+    await rabbitMQService.Instance.ConncetionReceive(
+        consumeIndex: 2, // 使用唯一的索引
+        exchangeName: configuration["MQ:DeadLetterExchangeName"],
+        queueName: configuration["MQ:Queues:2:QueueName"],
+        action: consumer.ExActionDeadLetter
     );
 });
 

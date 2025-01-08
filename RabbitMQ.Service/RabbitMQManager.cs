@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 
 namespace RabbitMQ.Service
 {
@@ -53,11 +54,18 @@ namespace RabbitMQ.Service
         /// 消费者个数
         /// </summary>
         public int _costomerCount;
-
-
-        public RabbitMQManager(string hostname, int port, string username, string password, string exchangeName)
+        public RabbitMQManager(IConfiguration configuration)
         {
-            _mqConfigs = new MqConfigInfo { Host = hostname, Port = port, User = username, Password = password, ExchangeName = exchangeName };
+            _mqConfigs = new MqConfigInfo
+            {
+                Host = configuration["MQ:Host"],
+                Port = Convert.ToInt32(configuration["MQ:Port"]),
+                User = configuration["MQ:User"],
+                Password = configuration["MQ:Password"],
+                ExchangeName = configuration["MQ:ExchangeName"],
+                DeadLetterExchangeName = configuration["MQ:DeadLetterExchangeName"],
+                DeadLetterQueueName = configuration["MQ:Queues:2:QueueName"]
+            };
         }
 
         /// <summary>
@@ -65,6 +73,8 @@ namespace RabbitMQ.Service
         /// </summary>
         public void InitProducerConnection()
         {
+            Console.WriteLine("【开始】>>>>>>>>>>>>>>>生产者连接");
+
             _connectionSendFactory = new ConnectionFactory
             {
                 HostName = _mqConfigs.Host,
@@ -86,8 +96,37 @@ namespace RabbitMQ.Service
 
             _modelSend = _connectionSend.CreateModel(); //创建生产者通道
 
-            // 修改为 Fanout 类型
-            _modelSend.ExchangeDeclare(_mqConfigs.ExchangeName, ExchangeType.Fanout);
+            // 声明主交换机 为 Fanout 类型，持久化
+            _modelSend.ExchangeDeclare(
+                exchange: _mqConfigs.ExchangeName,
+                type: ExchangeType.Fanout,
+                durable: true, // 明确设置为持久化
+                autoDelete: false,
+                arguments: null
+            );
+
+            // 声明死信交换机 为Fanout类型，持久化
+            _modelSend.ExchangeDeclare(
+                exchange: _mqConfigs.DeadLetterExchangeName,
+                type: ExchangeType.Fanout,
+                durable: true, // 明确设置为持久化
+                autoDelete: false,
+                arguments: null
+            );
+
+            // 声明死信队列
+            _modelSend.QueueDeclare(
+                queue: _mqConfigs.DeadLetterQueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null
+            );
+
+            // 绑定死信队列到死信交换机
+            _modelSend.QueueBind(_mqConfigs.DeadLetterQueueName, _mqConfigs.DeadLetterExchangeName, routingKey: "");
+
+            Console.WriteLine("【结束】>>>>>>>>>>>>>>>生产者连接");
         }
 
 
@@ -97,7 +136,7 @@ namespace RabbitMQ.Service
         /// <param name="message">消息内容</param>
         /// <param name="exchangeName">交换机名称</param>
         /// <returns>发布结果</returns>
-        public async Task<(bool Success, string ErrorMessage)> PublishAsync(string message,string exchangeName)
+        public async Task<(bool Success, string ErrorMessage)> PublishAsync(string message, string exchangeName)
         {
             try
             {
@@ -126,6 +165,8 @@ namespace RabbitMQ.Service
         /// </summary>
         public void InitConsumerConnections(List<QueueConfigInfo> queueConfigs)
         {
+            Console.WriteLine("【开始】>>>>>>>>>>>>>>>消费者连接");
+
             //创建单个连接工厂
             _connectionReceiveFactory = new ConnectionFactory
             {
@@ -134,7 +175,6 @@ namespace RabbitMQ.Service
                 UserName = _mqConfigs.User,
                 Password = _mqConfigs.Password
             };
-
             _costomerCount = queueConfigs.Sum(q => q.ConsumerCount); // 获取所有队列的消费者总数
 
             // 初始化数组         
@@ -142,59 +182,94 @@ namespace RabbitMQ.Service
             _modelReceive = new IModel[_costomerCount];
             _basicConsumer = new EventingBasicConsumer[_costomerCount];
 
-            
+            int consumerIndex = 0; // 用于跟踪当前消费者索引
 
-           
+            foreach (var queueConfig in queueConfigs)
+            {
+                for (int i = 0; i < queueConfig.ConsumerCount; i++)
+                {
+                    string queueName = queueConfig.QueueName;
+
+                    // 创建连接
+                    _connectionReceive[consumerIndex] = _connectionReceiveFactory.CreateConnection();
+                    _modelReceive[consumerIndex] = _connectionReceive[consumerIndex].CreateModel();
+                    _basicConsumer[consumerIndex] = new EventingBasicConsumer(_modelReceive[consumerIndex]);
+
+                    // 声明主交换机（确保交换机存在）
+                    _modelReceive[consumerIndex].ExchangeDeclare(_mqConfigs.ExchangeName, ExchangeType.Fanout, durable: true, autoDelete: false, arguments: null);
+
+                    // 声明死信交换机为 Fanout 类型
+                    _modelReceive[consumerIndex].ExchangeDeclare(_mqConfigs.DeadLetterExchangeName, ExchangeType.Fanout, durable: true, autoDelete: false, arguments: null);
+
+                    if (queueName == _mqConfigs.DeadLetterQueueName)
+                    {
+                        // 死信队列的声明和绑定
+                        _modelReceive[consumerIndex].QueueDeclare(
+                            queue: queueName,
+                            durable: true,
+                            exclusive: false,
+                            autoDelete: false,
+                            arguments: null
+                        );
+
+                        // 只将死信队列绑定到死信交换机
+                        _modelReceive[consumerIndex].QueueBind(queueName, _mqConfigs.DeadLetterExchangeName, routingKey: "");
+                    }
+                    else
+                    {
+                        // 业务队列的声明和绑定
+                        _modelReceive[consumerIndex].QueueDeclare(
+                            queue: queueName,
+                            durable: true,
+                            exclusive: false,
+                            autoDelete: false,
+                            arguments: new Dictionary<string, object>
+                            {
+                        { "x-dead-letter-exchange", _mqConfigs.DeadLetterExchangeName },
+                        { "x-dead-letter-routing-key", "" }
+                            }
+                        );
+
+                        // 只将业务队列绑定到主交换机
+                        _modelReceive[consumerIndex].QueueBind(queueName, _mqConfigs.ExchangeName, routingKey: "");
+                    }
+
+                    
+
+                    // 设置QoS，确保每次只处理一个消息
+                    _modelReceive[consumerIndex].BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+
+                    consumerIndex++;
+                }
+            }
+
+            Console.WriteLine("【结束】>>>>>>>>>>>>>>>消费者连接初始化完成");
         }
 
         /// <summary>
         /// 消费者连接
         /// </summary>
-        /// <param name="consumeIndex"></param>
-        /// <param name="exchangeName"></param>
-        /// <param name="routeKey"></param>
-        /// <param name="queueName"></param>
-        /// <param name="action"></param>
-        /// <returns></returns>
-        /// <summary>
-        /// 消费者连接
-        /// </summary>
         public async Task ConncetionReceive(int consumeIndex, string exchangeName, string queueName, Func<string, Task> action)
         {
-            Console.WriteLine($"开始连接RabbitMQ消费者：【队列】 {queueName}，【消费者索引】 {consumeIndex}");
-            if (_connectionReceive[consumeIndex] != null && _connectionReceive[consumeIndex].IsOpen)
-            {
-                Console.WriteLine($"消费者 {consumeIndex} 已经连接，无需重新连接");
-                return;
-            }
-
-            _connectionReceive[consumeIndex] = _connectionReceiveFactory.CreateConnection();
-            _modelReceive[consumeIndex] = _connectionReceive[consumeIndex].CreateModel();
-            _basicConsumer[consumeIndex] = new EventingBasicConsumer(_modelReceive[consumeIndex]);
-
-            // 修改为 Fanout 类型
-            _modelReceive[consumeIndex].ExchangeDeclare(exchangeName, ExchangeType.Fanout);
-
-            // 在发布订阅模式下，QueueName仍然需要绑定，但RoutingKey不再使用
-            _modelReceive[consumeIndex].QueueDeclare(
-                queue: queueName,
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: null
-            );
-
-            _modelReceive[consumeIndex].QueueBind(queueName, exchangeName, string.Empty); // 不使用 RoutingKey
-            _modelReceive[consumeIndex].BasicQos(0, 1, false);
 
             await StartListenerAsync(async (model, ea) =>
             {
-                byte[] message = ea.Body.ToArray();
-                string msg = Encoding.UTF8.GetString(message);
-                Console.WriteLine($"队列 {queueName}，消费者索引 {consumeIndex} 接收到消息：{msg}");
+                try
+                {
+                    byte[] message = ea.Body.ToArray();
+                    string msg = Encoding.UTF8.GetString(message);
+                    Console.WriteLine($"队列 {queueName}，消费者索引 {consumeIndex} 接收到消息：{msg}");
 
-                await action(msg);
-                _modelReceive[consumeIndex].BasicAck(ea.DeliveryTag, true);
+                    await action(msg);
+                    _modelReceive[consumeIndex].BasicAck(ea.DeliveryTag, true);//确认消息
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"处理消息时发生错误: {ex.Message}");
+                    // 拒绝消息且不重新入队，触发死信机制
+                    _modelReceive[consumeIndex].BasicNack(ea.DeliveryTag, false, false);
+                }
+
             }, queueName, consumeIndex);
         }
 

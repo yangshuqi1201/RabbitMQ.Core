@@ -22,10 +22,8 @@ namespace RabbitMQ.Core.Controllers
         /// </summary>
         /// <returns></returns>
         [HttpPost]
-        public async Task<IActionResult> TestRabbitMqPublishMessage()
+        public async Task<IActionResult> TestRabbitMqPublishMessage(string pubMessage)
         {
-
-            string pubMessage = "Hello, this is a broadcast message";
 
             var result = await _rabbitmqService.Instance.PublishAsync(
                 pubMessage,
